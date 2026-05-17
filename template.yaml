@@ -1,0 +1,159 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  auth-service
+  Customer authentication Lambda — email/password → JWT
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment stage
+
+  DBSecretName:
+    Type: String
+    Description: Name of the Secrets Manager secret containing RDS credentials
+    # Expected secret JSON keys: host, port, dbname, username, password
+
+  JWTSecret:
+    Type: String
+    NoEcho: true
+    Description: HS256 signing secret for JWT tokens (min 32 chars recommended)
+
+  JWTExpiryHours:
+    Type: Number
+    Default: 1
+    Description: JWT lifetime in hours
+
+  MaxFailedAttempts:
+    Type: Number
+    Default: 5
+    Description: Consecutive failures before account lock
+
+  CORSOrigin:
+    Type: String
+    Default: "*"
+    Description: Value for Access-Control-Allow-Origin response header
+
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC containing the RDS instance
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for the Lambda function (must have RDS access)
+
+  LambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group attached to the Lambda (must allow outbound to RDS port)
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures: [arm64]        # Graviton2 — cheaper + faster for Python
+    MemorySize: 256
+    Timeout: 30
+    Environment:
+      Variables:
+        DB_SECRET_NAME: !Ref DBSecretName
+        JWT_SECRET: !Ref JWTSecret
+        JWT_EXPIRY_HOURS: !Ref JWTExpiryHours
+        MAX_FAILED_ATTEMPTS: !Ref MaxFailedAttempts
+        CORS_ORIGIN: !Ref CORSOrigin
+        LOG_LEVEL: !Ref LogLevel
+    VpcConfig:
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroupId
+      SubnetIds: !Ref SubnetIds
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ── API Gateway ──────────────────────────────────────────────────────────
+  AuthApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub auth-api-${Stage}
+      StageName: !Ref Stage
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date,X-Api-Key'"
+        AllowOrigin: !Sub "'${CORSOrigin}'"
+        MaxAge: "'600'"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  # ── Lambda function ───────────────────────────────────────────────────────
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub auth-service-${Stage}
+      Handler: lambda_function.lambda_handler
+      Description: Customer authentication — email/password → JWT
+      Tracing: Active   # AWS X-Ray
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Statement:
+            - Sid: ReadDBSecret
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DBSecretName}*"
+      Events:
+        LoginPost:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AuthApi
+            Path: /auth/login
+            Method: POST
+        LoginOptions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref AuthApi
+            Path: /auth/login
+            Method: OPTIONS
+
+  # ── CloudWatch Log Group (explicit so retention is enforced) ─────────────
+  AuthFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/auth-service-${Stage}"
+      RetentionInDays: 30
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${AuthApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/auth/login"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt AuthFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FunctionArn"
+
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref AuthFunction

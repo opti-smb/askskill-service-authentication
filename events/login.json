@@ -1,0 +1,19 @@
+{
+  "httpMethod": "POST",
+  "path": "/auth/login",
+  "headers": {
+    "Content-Type": "application/json",
+    "Accept": "application/json"
+  },
+  "queryStringParameters": null,
+  "pathParameters": null,
+  "stageVariables": null,
+  "requestContext": {
+    "requestId": "local-test-request-id",
+    "stage": "dev",
+    "resourcePath": "/auth/login",
+    "httpMethod": "POST"
+  },
+  "body": "{\"email\": \"customer@example.com\", \"password\": \"PlainTextPassword\"}",
+  "isBase64Encoded": false
+}
